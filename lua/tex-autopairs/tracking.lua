@@ -1,33 +1,34 @@
 local api = vim.api
 local delimiters = require("tex-autopairs.delimiters")
+local text = require("tex-autopairs.text")
 local M = {}
 local namespace = api.nvim_create_namespace("tex-autopairs")
-local buffers = {}
+local states = {}
 
 local function undo_sequence(buf)
 	-- Avoid copying the undo tree on every edit of the current buffer.
 	return buf == api.nvim_get_current_buf() and vim.fn.changenr() or vim.fn.undotree(buf).seq_cur
 end
 
-local function mark(state, position, id)
-	id = api.nvim_buf_set_extmark(state.buf, namespace, position.row, position.col, {
-		id = id,
+local function mark(state, position, mark_id)
+	mark_id = api.nvim_buf_set_extmark(state.buf, namespace, position.row, position.col, {
+		id = mark_id,
 		end_row = position.end_row,
 		end_col = position.end_col,
 		right_gravity = true,
 		end_right_gravity = false,
 	})
-	state.pairs[id] = position.pair
+	state.pairs[mark_id] = position.pair
 end
 
 local function positions(state)
 	local result = {}
 	local extmarks = api.nvim_buf_get_extmarks(state.buf, namespace, 0, -1, { details = true })
 	for _, extmark in ipairs(extmarks) do
-		local id, row, col, details = extmark[1], extmark[2], extmark[3], extmark[4]
+		local mark_id, row, col, details = extmark[1], extmark[2], extmark[3], extmark[4]
 		---@cast details -nil
-		result[id] = {
-			pair = state.pairs[id],
+		result[mark_id] = {
+			pair = state.pairs[mark_id],
 			row = row,
 			col = col,
 			end_row = details.end_row,
@@ -39,7 +40,8 @@ end
 
 local function checkpoint(state)
 	local snapshot = positions(state)
-	for id, position in pairs(snapshot) do
+	-- Extmarks track positions; editing or escaping a token can end its ownership.
+	for mark_id, position in pairs(snapshot) do
 		local pair = position.pair
 		local row, col = position.row, position.col
 		local end_row, end_col = position.end_row, position.end_col
@@ -48,10 +50,10 @@ local function checkpoint(state)
 		local intact = (row < end_row or col + #pair.open <= end_col - #pair.close)
 			and first:sub(col + 1, col + #pair.open) == pair.open
 			and last:sub(end_col - #pair.close + 1, end_col) == pair.close
-			and not delimiters.escaped(first:sub(1, col))
+			and not text.escaped(first:sub(1, col))
 		if not intact then
-			snapshot[id], state.pairs[id] = nil, nil
-			api.nvim_buf_del_extmark(state.buf, namespace, id)
+			snapshot[mark_id], state.pairs[mark_id] = nil, nil
+			api.nvim_buf_del_extmark(state.buf, namespace, mark_id)
 		end
 	end
 	state.history[state.sequence] = snapshot
@@ -66,8 +68,8 @@ local function restore_undo_state(state)
 			-- Extmarks do not replay their birth when an earlier insertion is redone.
 			api.nvim_buf_clear_namespace(state.buf, namespace, 0, -1)
 			state.pairs = {}
-			for id, position in pairs(snapshot) do
-				mark(state, position, id)
+			for mark_id, position in pairs(snapshot) do
+				mark(state, position, mark_id)
 			end
 		end
 		state.sequence = sequence
@@ -83,21 +85,23 @@ local function new(buf)
 		tick = api.nvim_buf_get_changedtick(buf),
 		pairs = {},
 		history = { [sequence] = {} },
-		parents = {},
+		parents = {}, -- Predecessors remain reachable when old undo entries are pruned.
 	}
 end
 
 function M.attach(buf)
 	local state = new(buf)
-	buffers[buf] = state
+	states[buf] = state
 	local function on_update(event)
-		if buffers[buf] ~= state then
+		if states[buf] ~= state then
+			-- Returning true unregisters callbacks left over from an earlier attachment.
 			return true
 		end
 		if event == "bytes" then
 			local sequence = undo_sequence(buf)
 			if not state.replay and sequence ~= state.sequence then
-				-- on_bytes runs before extmarks move: these positions close the previous undo block.
+				-- Text is already new, but extmarks still describe the previous undo block.
+				-- Save those positions without comparing them against a different buffer version.
 				state.history[state.sequence] = positions(state)
 				state.parents[sequence] = state.sequence
 				state.sequence = sequence
@@ -105,8 +109,9 @@ function M.attach(buf)
 		elseif event == "reload" then
 			api.nvim_buf_clear_namespace(buf, namespace, 0, -1)
 			state = new(buf)
-			buffers[buf] = state
+			states[buf] = state
 		elseif event == "changedtick" then
+			-- Tick-only notifications can reveal undo/redo replay back to the same sequence.
 			state.replay = true
 		end
 	end
@@ -118,12 +123,13 @@ function M.attach(buf)
 end
 
 function M.detach(buf)
-	buffers[buf] = nil
+	states[buf] = nil
 	api.nvim_buf_clear_namespace(buf, namespace, 0, -1)
 end
 
 function M.sync(buf)
-	local state = buffers[buf]
+	-- Lifecycle events and buffer-local mappings call this only while attached.
+	local state = states[buf]
 	if
 		not state.replay
 		and undo_sequence(state.buf) == state.sequence
@@ -148,57 +154,61 @@ local function add(state, pair, row, col)
 end
 
 -- These commands run after native Insert-mode edits have committed.
-function M.track(id)
+---@param reference integer|string Pair definition id, or the literal dollar token.
+function M.track(reference)
 	local cursor = api.nvim_win_get_cursor(0)
-	add(buffers[api.nvim_get_current_buf()], delimiters.pairs[id], cursor[1] - 1, cursor[2])
+	local pair
+	if type(reference) == "number" then
+		pair = delimiters.pairs[reference]
+	else
+		pair = { open = reference, close = reference, replaceable = false }
+	end
+	-- Definition ids select pairs; extmark ids identify their individual occurrences.
+	add(states[api.nvim_get_current_buf()], pair, cursor[1] - 1, cursor[2])
 end
 
-function M.dollar(width)
-	local cursor = api.nvim_win_get_cursor(0)
-	local token = string.rep("$", width)
-	add(buffers[api.nvim_get_current_buf()], { open = token, close = token }, cursor[1] - 1, cursor[2])
-end
-
-function M.finish(id)
-	local state = buffers[api.nvim_get_current_buf()]
+function M.finish(mark_id)
+	local state = states[api.nvim_get_current_buf()]
 	restore_undo_state(state)
-	state.pairs[id] = nil
-	api.nvim_buf_del_extmark(state.buf, namespace, id)
+	state.pairs[mark_id] = nil
+	api.nvim_buf_del_extmark(state.buf, namespace, mark_id)
 	checkpoint(state)
 end
 
-function M.at_closer(buf, row, col, prefix_length)
-	local state = buffers[buf]
+function M.at_closer(buf, row, col, typed_prefix_len)
+	-- The cursor includes this many already-inserted characters of the closing token.
+	local state = states[buf]
 	local target
 	local extmarks = api.nvim_buf_get_extmarks(state.buf, namespace, { row, col }, { row, col }, {
 		details = true,
 		overlap = true,
 	})
 	for _, extmark in ipairs(extmarks) do
-		local id, start_row, start_col, details = extmark[1], extmark[2], extmark[3], extmark[4]
+		local mark_id, start_row, start_col, details = extmark[1], extmark[2], extmark[3], extmark[4]
 		---@cast details -nil
-		local pair = state.pairs[id]
-		local inside = start_row < row or start_col + #pair.open <= col - prefix_length
+		local pair = state.pairs[mark_id]
+		-- The closing prefix must lie inside the pair, without borrowing its opener.
+		local inside = start_row < row or start_col + #pair.open <= col - typed_prefix_len
 		if
 			inside
 			and details.end_row == row
 			and details.end_col == col + #pair.close
 			and (not target or start_row > target.row or (start_row == target.row and start_col > target.col))
 		then
-			target = { id = id, pair = pair, row = start_row, col = start_col }
+			target = { mark_id = mark_id, pair = pair, row = start_row, col = start_col }
 		end
 	end
 	return target
 end
 
 function M.prune(buf)
-	local state = buffers[buf]
+	local state = states[buf]
 	local retained = { [state.sequence] = true }
 	local function visit(entries)
 		for _, entry in ipairs(entries) do
 			retained[entry.seq] = true
 			if state.parents[entry.seq] then
-				-- The oldest reachable state precedes the first entry in the undo tree.
+				-- Each change can be undone to its predecessor, even if earlier entries were pruned.
 				retained[state.parents[entry.seq]] = true
 			end
 			if entry.alt then

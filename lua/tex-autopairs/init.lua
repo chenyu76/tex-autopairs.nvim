@@ -3,15 +3,20 @@ local delimiters = require("tex-autopairs.delimiters")
 local input = require("tex-autopairs.input")
 local tracking = require("tex-autopairs.tracking")
 local M = {}
-local buffers = {}
+local mappings_by_buffer = {}
+
+local function resolve_buf(buf)
+	return (buf == nil or buf == 0) and api.nvim_get_current_buf() or buf
+end
 
 function M.detach(buf)
-	buf = (buf == nil or buf == 0) and api.nvim_get_current_buf() or buf
-	local mappings = buffers[buf]
+	buf = resolve_buf(buf)
+	local mappings = mappings_by_buffer[buf]
 	if not mappings then
 		return
 	end
-	buffers[buf] = nil
+	mappings_by_buffer[buf] = nil
+	-- maparg/mapset operate in the current buffer, even for hidden buffers.
 	api.nvim_buf_call(buf, function()
 		for lhs, mapping in pairs(mappings) do
 			local current = vim.fn.maparg(lhs, "i", false, true)
@@ -27,19 +32,21 @@ function M.detach(buf)
 end
 
 function M.attach(buf)
-	buf = (buf == nil or buf == 0) and api.nvim_get_current_buf() or buf
-	if not api.nvim_buf_is_loaded(buf) or vim.bo[buf].filetype ~= "tex" or buffers[buf] then
+	buf = resolve_buf(buf)
+	if not api.nvim_buf_is_loaded(buf) or vim.bo[buf].filetype ~= "tex" or mappings_by_buffer[buf] then
 		return
 	end
 	local mappings = {}
-	buffers[buf] = mappings
+	mappings_by_buffer[buf] = mappings
 	tracking.attach(buf)
+	-- maparg has no buffer argument; inspect mappings in their buffer's context.
 	api.nvim_buf_call(buf, function()
 		for _, lhs in ipairs(delimiters.keys) do
 			local previous = vim.fn.maparg(lhs, "i", false, true)
 			local callback = function()
-				local result = vim.bo.filetype == "tex" and input.handle(buf, lhs) or lhs
-				-- Expr mappings can run before preceding literal input is committed.
+				-- :noautocmd can change filetype without removing these mappings.
+				local result = vim.bo.filetype == "tex" and input.handle(lhs) or lhs
+				-- Feed native keys: expression mappings may see preceding input before it is committed.
 				api.nvim_feedkeys(api.nvim_replace_termcodes(result, true, false, true), "in", false)
 			end
 			mappings[lhs] = {
@@ -48,7 +55,6 @@ function M.attach(buf)
 			}
 			vim.keymap.set("i", lhs, callback, {
 				buffer = buf,
-				silent = true,
 				desc = "tex-autopairs: " .. lhs,
 			})
 		end
@@ -56,7 +62,7 @@ function M.attach(buf)
 end
 
 function M.setup()
-	for _, buf in ipairs(vim.tbl_keys(buffers)) do
+	for _, buf in ipairs(vim.tbl_keys(mappings_by_buffer)) do
 		M.detach(buf)
 	end
 	local group = api.nvim_create_augroup("tex-autopairs", { clear = true })
@@ -79,7 +85,8 @@ function M.setup()
 	api.nvim_create_autocmd({ "InsertEnter", "InsertLeavePre", "TextChanged", "TextChangedI" }, {
 		group = group,
 		callback = function(event)
-			if buffers[event.buf] then
+			if mappings_by_buffer[event.buf] then
+				-- Mappings also sync; the changedtick check makes duplicate calls cheap.
 				tracking.sync(event.buf)
 				if event.event == "InsertLeavePre" then
 					tracking.prune(event.buf)
