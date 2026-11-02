@@ -5,7 +5,7 @@ local M = {}
 local left, right = "<C-G>U<Left>", "<C-G>U<Right>"
 
 local function command(action, argument)
-	return '<Cmd>lua require("tex-autopairs")._' .. action .. "(" .. argument .. ")<CR>"
+	return '<Cmd>lua require("tex-autopairs.tracking").' .. action .. "(" .. argument .. ")<CR>"
 end
 
 local function insert_pair(pair, typed)
@@ -48,11 +48,11 @@ local function skip(token)
 	return string.rep("<BS>", #token - 1) .. string.rep(right, #token)
 end
 
-local function handle_dollar(state, before, after, row, col)
+local function handle_dollar(buf, before, after, row, col)
 	if delimiters.escaped(before) then
 		return "$"
 	end
-	local target = tracking.at_closer(state, row, col, 0)
+	local target = tracking.at_closer(buf, row, col, 0)
 	if target and target.pair.open == "$" then
 		local finish = right .. command("finish", target.id)
 		if target.row == row and target.col + 1 == col then
@@ -70,21 +70,21 @@ local function handle_dollar(state, before, after, row, col)
 	return after:sub(1, 1) == "$" and right or "$$" .. left .. command("dollar", 1)
 end
 
-function M.handle(state, key)
+function M.handle(buf, key)
 	if not vim.bo.modifiable then
 		return key
 	end
-	tracking.sync(state)
+	tracking.sync(buf)
 	local cursor = api.nvim_win_get_cursor(0)
 	local row, col = cursor[1] - 1, cursor[2]
 	local line = api.nvim_get_current_line()
 	local before, after = line:sub(1, col), line:sub(col + 1)
 	if key == "<BS>" then
-		local target = tracking.at_closer(state, row, col, 0)
+		local target = tracking.at_closer(buf, row, col, 0)
 		local open, close = empty_pair(before, after, target, row, col)
 		return open and string.rep("<BS>", #open) .. string.rep("<Del>", #close) or key
 	elseif key == "$" then
-		return handle_dollar(state, before, after, row, col)
+		return handle_dollar(buf, before, after, row, col)
 	end
 
 	local text = before .. key
@@ -95,7 +95,7 @@ function M.handle(state, key)
 		close = nil
 	end
 	if close then
-		local target = tracking.at_closer(state, row, col, #close.close - 1)
+		local target = tracking.at_closer(buf, row, col, #close.close - 1)
 		-- A complete opener starts a nested pair unless it closes the current one.
 		local opening = open and open.open == close.close
 		local replace = target and target.pair.replaceable and close.replaceable and not opening

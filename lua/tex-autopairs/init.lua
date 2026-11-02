@@ -5,36 +5,15 @@ local tracking = require("tex-autopairs.tracking")
 local M = {}
 local buffers = {}
 
--- These commands run after native Insert-mode edits have committed.
-function M._track(id)
-	local cursor = api.nvim_win_get_cursor(0)
-	tracking.add(buffers[api.nvim_get_current_buf()].tracking, delimiters.pairs[id], cursor[1] - 1, cursor[2])
-end
-
-function M._dollar(width)
-	local cursor = api.nvim_win_get_cursor(0)
-	local token = string.rep("$", width)
-	tracking.add(
-		buffers[api.nvim_get_current_buf()].tracking,
-		{ open = token, close = token },
-		cursor[1] - 1,
-		cursor[2]
-	)
-end
-
-function M._finish(id)
-	tracking.finish(buffers[api.nvim_get_current_buf()].tracking, id)
-end
-
 function M.detach(buf)
 	buf = (buf == nil or buf == 0) and api.nvim_get_current_buf() or buf
-	local state = buffers[buf]
-	if not state then
+	local mappings = buffers[buf]
+	if not mappings then
 		return
 	end
 	buffers[buf] = nil
 	api.nvim_buf_call(buf, function()
-		for lhs, mapping in pairs(state.mappings) do
+		for lhs, mapping in pairs(mappings) do
 			local current = vim.fn.maparg(lhs, "i", false, true)
 			if current.buffer == 1 and current.callback == mapping.callback then
 				vim.keymap.del("i", lhs, { buffer = buf })
@@ -44,7 +23,7 @@ function M.detach(buf)
 			end
 		end
 	end)
-	tracking.clear_marks(state.tracking)
+	tracking.detach(buf)
 end
 
 function M.attach(buf)
@@ -52,20 +31,18 @@ function M.attach(buf)
 	if not api.nvim_buf_is_loaded(buf) or vim.bo[buf].filetype ~= "tex" or buffers[buf] then
 		return
 	end
-	local state = {
-		mappings = {},
-		tracking = tracking.new(buf),
-	}
-	buffers[buf] = state
+	local mappings = {}
+	buffers[buf] = mappings
+	tracking.attach(buf)
 	api.nvim_buf_call(buf, function()
 		for _, lhs in ipairs(delimiters.keys) do
 			local previous = vim.fn.maparg(lhs, "i", false, true)
 			local callback = function()
-				local result = vim.bo.filetype == "tex" and input.handle(state.tracking, lhs) or lhs
+				local result = vim.bo.filetype == "tex" and input.handle(buf, lhs) or lhs
 				-- Expr mappings can run before preceding literal input is committed.
 				api.nvim_feedkeys(api.nvim_replace_termcodes(result, true, false, true), "in", false)
 			end
-			state.mappings[lhs] = {
+			mappings[lhs] = {
 				callback = callback,
 				previous = previous.buffer == 1 and previous or nil,
 			}
@@ -76,24 +53,6 @@ function M.attach(buf)
 			})
 		end
 	end)
-	local function on_update(event)
-		if buffers[buf] ~= state then
-			return true
-		end
-		if event == "bytes" then
-			tracking.on_bytes(state.tracking)
-		elseif event == "reload" then
-			tracking.clear_marks(state.tracking)
-			state.tracking = tracking.new(buf)
-		elseif event == "changedtick" then
-			state.tracking.replay = true
-		end
-	end
-	api.nvim_buf_attach(buf, false, {
-		on_bytes = on_update,
-		on_reload = on_update,
-		on_changedtick = on_update,
-	})
 end
 
 function M.setup()
@@ -120,11 +79,10 @@ function M.setup()
 	api.nvim_create_autocmd({ "InsertEnter", "InsertLeavePre", "TextChanged", "TextChangedI" }, {
 		group = group,
 		callback = function(event)
-			local state = buffers[event.buf]
-			if state then
-				tracking.sync(state.tracking)
+			if buffers[event.buf] then
+				tracking.sync(event.buf)
 				if event.event == "InsertLeavePre" then
-					tracking.prune(state.tracking)
+					tracking.prune(event.buf)
 				end
 			end
 		end,

@@ -2,6 +2,7 @@ local api = vim.api
 local delimiters = require("tex-autopairs.delimiters")
 local M = {}
 local namespace = api.nvim_create_namespace("tex-autopairs")
+local buffers = {}
 
 local function undo_sequence(buf)
 	-- Avoid copying the undo tree on every edit of the current buffer.
@@ -23,7 +24,8 @@ local function positions(state)
 	local result = {}
 	local extmarks = api.nvim_buf_get_extmarks(state.buf, namespace, 0, -1, { details = true })
 	for _, extmark in ipairs(extmarks) do
-		local id, row, col, details = unpack(extmark)
+		local id, row, col, details = extmark[1], extmark[2], extmark[3], extmark[4]
+		---@cast details -nil
 		result[id] = {
 			pair = state.pairs[id],
 			row = row,
@@ -73,7 +75,7 @@ local function restore_undo_state(state)
 	state.replay = nil
 end
 
-function M.new(buf)
+local function new(buf)
 	local sequence = undo_sequence(buf)
 	return {
 		buf = buf,
@@ -85,17 +87,43 @@ function M.new(buf)
 	}
 end
 
-function M.on_bytes(state)
-	local sequence = undo_sequence(state.buf)
-	if not state.replay and sequence ~= state.sequence then
-		-- on_bytes runs before extmarks move: these positions close the previous undo block.
-		state.history[state.sequence] = positions(state)
-		state.parents[sequence] = state.sequence
-		state.sequence = sequence
+function M.attach(buf)
+	local state = new(buf)
+	buffers[buf] = state
+	local function on_update(event)
+		if buffers[buf] ~= state then
+			return true
+		end
+		if event == "bytes" then
+			local sequence = undo_sequence(buf)
+			if not state.replay and sequence ~= state.sequence then
+				-- on_bytes runs before extmarks move: these positions close the previous undo block.
+				state.history[state.sequence] = positions(state)
+				state.parents[sequence] = state.sequence
+				state.sequence = sequence
+			end
+		elseif event == "reload" then
+			api.nvim_buf_clear_namespace(buf, namespace, 0, -1)
+			state = new(buf)
+			buffers[buf] = state
+		elseif event == "changedtick" then
+			state.replay = true
+		end
 	end
+	api.nvim_buf_attach(buf, false, {
+		on_bytes = on_update,
+		on_reload = on_update,
+		on_changedtick = on_update,
+	})
 end
 
-function M.sync(state)
+function M.detach(buf)
+	buffers[buf] = nil
+	api.nvim_buf_clear_namespace(buf, namespace, 0, -1)
+end
+
+function M.sync(buf)
+	local state = buffers[buf]
 	if
 		not state.replay
 		and undo_sequence(state.buf) == state.sequence
@@ -107,7 +135,7 @@ function M.sync(state)
 	checkpoint(state)
 end
 
-function M.add(state, pair, row, col)
+local function add(state, pair, row, col)
 	restore_undo_state(state)
 	mark(state, {
 		pair = pair,
@@ -119,21 +147,36 @@ function M.add(state, pair, row, col)
 	checkpoint(state)
 end
 
-function M.finish(state, id)
+-- These commands run after native Insert-mode edits have committed.
+function M.track(id)
+	local cursor = api.nvim_win_get_cursor(0)
+	add(buffers[api.nvim_get_current_buf()], delimiters.pairs[id], cursor[1] - 1, cursor[2])
+end
+
+function M.dollar(width)
+	local cursor = api.nvim_win_get_cursor(0)
+	local token = string.rep("$", width)
+	add(buffers[api.nvim_get_current_buf()], { open = token, close = token }, cursor[1] - 1, cursor[2])
+end
+
+function M.finish(id)
+	local state = buffers[api.nvim_get_current_buf()]
 	restore_undo_state(state)
 	state.pairs[id] = nil
 	api.nvim_buf_del_extmark(state.buf, namespace, id)
 	checkpoint(state)
 end
 
-function M.at_closer(state, row, col, prefix_length)
+function M.at_closer(buf, row, col, prefix_length)
+	local state = buffers[buf]
 	local target
 	local extmarks = api.nvim_buf_get_extmarks(state.buf, namespace, { row, col }, { row, col }, {
 		details = true,
 		overlap = true,
 	})
 	for _, extmark in ipairs(extmarks) do
-		local id, start_row, start_col, details = unpack(extmark)
+		local id, start_row, start_col, details = extmark[1], extmark[2], extmark[3], extmark[4]
+		---@cast details -nil
 		local pair = state.pairs[id]
 		local inside = start_row < row or start_col + #pair.open <= col - prefix_length
 		if
@@ -148,7 +191,8 @@ function M.at_closer(state, row, col, prefix_length)
 	return target
 end
 
-function M.prune(state)
+function M.prune(buf)
+	local state = buffers[buf]
 	local retained = { [state.sequence] = true }
 	local function visit(entries)
 		for _, entry in ipairs(entries) do
@@ -168,10 +212,6 @@ function M.prune(state)
 			state.history[sequence], state.parents[sequence] = nil, nil
 		end
 	end
-end
-
-function M.clear_marks(state)
-	api.nvim_buf_clear_namespace(state.buf, namespace, 0, -1)
 end
 
 return M
