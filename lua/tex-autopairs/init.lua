@@ -36,33 +36,40 @@ end
 
 function M.attach(buf)
 	buf = resolve_buf(buf)
-	if not api.nvim_buf_is_loaded(buf) or vim.bo[buf].filetype ~= "tex" or mappings_by_buffer[buf] then
+	if not api.nvim_buf_is_loaded(buf) or vim.bo[buf].filetype ~= "tex" then
 		return
 	end
-	local mappings = {}
-	mappings_by_buffer[buf] = mappings
-	tracking.attach(buf)
+	local mappings = mappings_by_buffer[buf]
+	if not mappings then
+		mappings = {}
+		mappings_by_buffer[buf] = mappings
+		tracking.attach(buf)
+	end
 	-- maparg has no buffer argument; inspect mappings in their buffer's context.
 	api.nvim_buf_call(buf, function()
 		for _, lhs in ipairs(delimiters.keys) do
 			local previous = vim.fn.maparg(lhs, "i", false, true)
-			local callback = function()
-				-- :noautocmd can change filetype without removing these mappings.
-				if vim.bo.filetype == "tex" then
-					input.insert(lhs)
-				else
-					input.feed(lhs)
+			local mapping = mappings[lhs]
+			-- Earlier FileType handlers can replace mappings without detaching pair tracking.
+			if not mapping or previous.callback ~= mapping.callback then
+				local callback = function()
+					-- :noautocmd can change filetype without removing these mappings.
+					if vim.bo.filetype == "tex" then
+						input.insert(lhs)
+					else
+						input.feed(lhs)
+					end
 				end
+				mappings[lhs] = {
+					callback = callback,
+					previous = previous.buffer == 1 and previous or nil,
+				}
+				-- A non-expression callback sees preceding literal input after it commits.
+				vim.keymap.set("i", lhs, callback, {
+					buffer = buf,
+					desc = "tex-autopairs: " .. lhs,
+				})
 			end
-			mappings[lhs] = {
-				callback = callback,
-				previous = previous.buffer == 1 and previous or nil,
-			}
-			-- A non-expression callback sees preceding literal input after it commits.
-			vim.keymap.set("i", lhs, callback, {
-				buffer = buf,
-				desc = "tex-autopairs: " .. lhs,
-			})
 		end
 	end)
 end
