@@ -3,8 +3,189 @@ local delimiters = require("tex-autopairs.delimiters")
 local text = require("tex-autopairs.text")
 local tracking = require("tex-autopairs.tracking")
 local M = {}
+local sessions = {}
+local emitting = false
 -- Automatic cursor moves must stay in the same undo block as the insertion.
 local left, right = "<C-G>U<Left>", "<C-G>U<Right>"
+
+function M.end_feed()
+	emitting = false
+end
+
+function M.feed(keys)
+	-- Generated cursor commands contain unmapped bytes, such as U in <C-G>U.
+	emitting = true
+	local output = keys .. '<Cmd>lua require("tex-autopairs.input").end_feed()<CR>'
+	api.nvim_feedkeys(api.nvim_replace_termcodes(output, true, false, true), "in", false)
+end
+
+function M.cancel_closing(buf)
+	sessions[buf] = nil
+end
+
+local function closing_at(buf, row, col)
+	local session = sessions[buf]
+	if not session then
+		return
+	end
+	if row == session.row and col == session.col then
+		local target = tracking.at_closer(buf, row, col, 0, session.merged)
+		if target and target.mark_id == session.mark_id then
+			return session, target
+		end
+	end
+	M.cancel_closing(buf)
+end
+
+function M.validate_closing(buf)
+	if sessions[buf] and not emitting then
+		tracking.sync(buf)
+		local cursor = api.nvim_win_get_cursor(0)
+		closing_at(buf, cursor[1] - 1, cursor[2])
+	end
+end
+
+-- Native edits have committed before this queued command records the next position.
+function M.resume_closing(merged, start_col)
+	local buf = api.nvim_get_current_buf()
+	local cursor = api.nvim_win_get_cursor(0)
+	local row, col = cursor[1] - 1, cursor[2]
+	local target = tracking.at_closer(buf, row, col, 0, merged)
+	if target then
+		-- Keep the owner's id; row/col describe the expected cursor, not the pair's range.
+		sessions[buf] = { mark_id = target.mark_id, merged = merged, start_col = start_col, row = row, col = col }
+	else
+		M.cancel_closing(buf)
+	end
+end
+
+local function resume_closing(merged, start_col)
+	return '<Cmd>lua require("tex-autopairs.input").resume_closing(' .. merged .. "," .. start_col .. ")<CR>"
+end
+
+local function restore_closer(target, merged)
+	if merged > 0 then
+		local token = target.pair.close
+		-- Insert before deleting the old suffix so the pair's end mark follows the text.
+		return token .. string.rep("<Del>", #token - merged) .. string.rep(left, #token)
+	end
+	return ""
+end
+
+local function matched_prefix_len(value, token)
+	for width = math.min(#value, #token - 1), 1, -1 do
+		if text.ends_with_unescaped(value, token:sub(1, width)) then
+			return width
+		end
+	end
+	return 0
+end
+
+function M.reconcile_closing(start_col)
+	local buf = api.nvim_get_current_buf()
+	local cursor = api.nvim_win_get_cursor(0)
+	local target = tracking.at_closer(buf, cursor[1] - 1, cursor[2], 0)
+	if target then
+		-- Native deletion decides how many bytes tab stops and combining characters remove.
+		local typed = api.nvim_get_current_line():sub(start_col + 1, cursor[2])
+		local merged = matched_prefix_len(typed, target.pair.close)
+		M.feed(string.rep("<Del>", merged) .. resume_closing(merged, start_col))
+	else
+		M.cancel_closing(buf)
+	end
+end
+
+local function edit_prefix(session, target, key, before)
+	local start_col = session and session.start_col or #before
+	local typed = before:sub(start_col + 1)
+	local previous = session and session.merged or 0
+	if key == "<BS>" then
+		if previous > 0 then
+			-- A merged prefix ends in an ASCII token character; restore its preceding suffix.
+			local merged = matched_prefix_len(typed:sub(1, -2), target.pair.close)
+			if merged == previous - 1 then
+				return left .. resume_closing(merged, start_col)
+			end
+		end
+		return restore_closer(target, previous)
+			.. key
+			.. '<Cmd>lua require("tex-autopairs.input").reconcile_closing('
+			.. start_col
+			.. ")<CR>"
+	end
+	local merged = matched_prefix_len(typed .. key, target.pair.close)
+	local output
+	if merged == previous + #key then
+		output = string.rep(right, #key)
+	else
+		output = restore_closer(target, previous) .. key .. string.rep("<Del>", merged)
+	end
+	return output .. resume_closing(merged, start_col)
+end
+
+local leave_keys = {}
+for _, key in ipairs({
+	"<Esc>",
+	"<C-C>",
+	"<C-O>",
+	"<Left>",
+	"<Right>",
+	"<Up>",
+	"<Down>",
+	"<Home>",
+	"<End>",
+	"<Del>",
+}) do
+	leave_keys[api.nvim_replace_termcodes(key, true, false, true)] = true
+end
+
+function M.observe(key)
+	if emitting then
+		return
+	end
+	local buf = api.nvim_get_current_buf()
+	local session = sessions[buf]
+	if not session then
+		return
+	end
+	if vim.bo.filetype ~= "tex" or not vim.bo.modifiable or api.nvim_get_mode().mode ~= "i" or leave_keys[key] then
+		M.cancel_closing(buf)
+		return
+	end
+	-- Mapped characters are handled before their native output is emitted.
+	local byte = key:byte(1)
+	-- K_SPECIAL (0x80) prefixes encoded keys, including Lua mapping callbacks.
+	local newline = key == "\r" or key == "\n"
+	local tab = key == "\t"
+	if
+		delimiters.openers[key]
+		or not byte
+		or (byte < 32 and not newline and not tab)
+		or byte == 127
+		or byte == 0x80
+	then
+		return
+	end
+	tracking.sync(buf)
+	local cursor = api.nvim_win_get_cursor(0)
+	local target
+	session, target = closing_at(buf, cursor[1] - 1, cursor[2])
+	if not session then
+		return
+	end
+	if newline then
+		-- A new line ends this session; repair after native indentation or line insertion.
+		M.cancel_closing(buf)
+		if session.merged > 0 then
+			M.feed(restore_closer(target, session.merged))
+		end
+	elseif session.merged > 0 or tab then
+		-- The current key inserts first; native repair keys also become part of dot repeat.
+		M.feed(restore_closer(target, session.merged) .. resume_closing(0, session.start_col))
+	else
+		session.col = session.col + #key
+	end
+end
 
 -- <Cmd> queues state updates after native edits and cursor movement have run.
 local function track(reference)
@@ -57,6 +238,19 @@ local function close_pair(target)
 	return skip(target.pair.close) .. finish(target.mark_id)
 end
 
+local function replace_closer(target, close, key, merged)
+	local pair = target.pair
+	local remove = string.rep("<Del>", #pair.close - merged)
+	if pair.close_prefix_len > 0 and close.can_shorten then
+		return string.rep("<BS>", #close.close - 1)
+			.. remove
+			.. pair.close:sub(1, pair.close_prefix_len)
+			.. close.close
+			.. finish(target.mark_id)
+	end
+	return remove .. key .. finish(target.mark_id)
+end
+
 local function handle_dollar(buf, before, after, row, col)
 	if text.escaped(before) then
 		return "$"
@@ -92,15 +286,22 @@ function M.handle(key)
 	local row, col = cursor[1] - 1, cursor[2]
 	local line = api.nvim_get_current_line()
 	local before, after = line:sub(1, col), line:sub(col + 1)
+	local session, target = closing_at(buf, row, col)
+	local merged = session and session.merged or 0
+	-- Only prefix-edit results resume the session after their native keys finish.
+	M.cancel_closing(buf)
 	if key == "<BS>" then
-		local target = tracking.at_closer(buf, row, col, 0)
+		if session and col > session.start_col then
+			return edit_prefix(session, target, key, before)
+		end
+		target = tracking.at_closer(buf, row, col, 0)
 		local pair = empty_pair(before, after, target, row, col)
 		if pair then
 			return string.rep("<BS>", #pair.open) .. string.rep("<Del>", #pair.close)
 		end
 		return key
 	elseif key == "$" then
-		return handle_dollar(buf, before, after, row, col)
+		return restore_closer(target, merged) .. handle_dollar(buf, before, after, row, col)
 	end
 
 	local candidate = before .. key
@@ -108,28 +309,36 @@ function M.handle(key)
 	local close = completed(candidate, delimiters.closers[key], "close")
 	-- Decide the longest token before choosing an opening or closing action.
 	if open and (not close or #open.open > #close.close) then
-		return key .. append_closer(open.close, open.id)
+		return restore_closer(target, merged) .. key .. append_closer(open.close, open.id)
 	end
-	if not close then
-		return key
+	if not target then
+		target = tracking.at_closer(buf, row, col, close and #close.close - 1 or 0)
 	end
-	local target = tracking.at_closer(buf, row, col, #close.close - 1)
-	if target and target.pair.close == close.close then
+	if close and target and target.pair.close == close.close then
+		if session then
+			return string.rep(right, #target.pair.close - merged) .. finish(target.mark_id)
+		end
 		return close_pair(target)
 	end
-	local matching_after = vim.startswith(after, close.close)
-	if open and open.open == close.close then
+	local matching_after = close and vim.startswith(after, close.close)
+	if open and close and open.open == close.close then
 		-- Symmetric tokens close their own pair or start a nested pair.
 		if matching_after then
 			return skip(close.close)
 		end
-		return key .. append_closer(open.close, open.id)
+		return restore_closer(target, merged) .. key .. append_closer(open.close, open.id)
 	end
-	if target and target.pair.replaceable and close.replaceable then
-		return string.rep("<Del>", #target.pair.close) .. key .. finish(target.mark_id)
+	if close and target and target.pair.replaceable and close.replaceable then
+		return replace_closer(target, close, key, merged)
 	end
 	if matching_after then
 		return skip(close.close)
+	end
+	if
+		session
+		or (target and #target.pair.close > 1 and target.pair.close:sub(1, 1) == key and not text.escaped(before))
+	then
+		return edit_prefix(session, target, key, before)
 	end
 	return key
 end

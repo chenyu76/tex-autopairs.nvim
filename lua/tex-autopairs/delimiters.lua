@@ -6,6 +6,8 @@ local M = { pairs = {}, openers = {}, closers = {} }
 -- replaceable: allow standalone closer overrides, e.g. [x) replaces the generated ].
 -- Both pairs must allow an override; all generated sized pairs allow it.
 -- Omitted boolean flags default to false.
+-- Runtime close_prefix_len separates a sizing command from its delimiter.
+-- Closer can_shorten permits replacing that delimiter without typing the size command.
 local definitions = {
 	{ open = "(", close = ")", standalone = true, sized = true, replaceable = true },
 	{ open = "[", close = "]", standalone = true, sized = true, replaceable = true },
@@ -38,6 +40,7 @@ for _, spec in ipairs(definitions) do
 			open = spec.open,
 			close = spec.close,
 			replaceable = spec.replaceable == true,
+			close_prefix_len = 0,
 		})
 	end
 end
@@ -62,6 +65,7 @@ for _, size in ipairs({
 				open = size.open .. spec.open,
 				close = size.close .. spec.close,
 				replaceable = true,
+				close_prefix_len = #size.close,
 			})
 			if size.open ~= size.close and spec.open ~= spec.close then
 				table.insert(closer_tokens, { close = size.close .. spec.open, replaceable = true })
@@ -79,13 +83,20 @@ local function add_to_index(index, token, spec)
 	table.insert(index[key], spec)
 end
 
+local opening_tokens, short_closers = {}, {}
 for id, spec in ipairs(M.pairs) do
 	spec.id = id
+	opening_tokens[spec.open] = true
+	if spec.close_prefix_len == 0 then
+		short_closers[spec.close] = true
+	end
 	add_to_index(M.openers, spec.open, spec)
 	-- Closers have their own vocabulary; some have no corresponding opener.
 	table.insert(closer_tokens, { close = spec.close, replaceable = spec.replaceable })
 end
 for _, spec in ipairs(closer_tokens) do
+	-- A token that also opens a pair must retain its nesting behavior.
+	spec.can_shorten = spec.replaceable and short_closers[spec.close] == true and not opening_tokens[spec.close]
 	add_to_index(M.closers, spec.close, spec)
 end
 
@@ -94,8 +105,10 @@ local mapped_keys = { ["$"] = true, ["<BS>"] = true }
 for key in pairs(M.openers) do
 	mapped_keys[key] = true
 end
-for key in pairs(M.closers) do
-	mapped_keys[key] = true
+for _, spec in ipairs(closer_tokens) do
+	for key in spec.close:gmatch(".") do
+		mapped_keys[key] = true
+	end
 end
 M.keys = vim.tbl_keys(mapped_keys)
 table.sort(M.keys)

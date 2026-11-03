@@ -16,6 +16,7 @@ function M.detach(buf)
 		return
 	end
 	mappings_by_buffer[buf] = nil
+	input.cancel_closing(buf)
 	-- maparg/mapset operate in the current buffer, even for hidden buffers.
 	api.nvim_buf_call(buf, function()
 		for lhs, mapping in pairs(mappings) do
@@ -47,7 +48,7 @@ function M.attach(buf)
 				-- :noautocmd can change filetype without removing these mappings.
 				local result = vim.bo.filetype == "tex" and input.handle(lhs) or lhs
 				-- Feed native keys: expression mappings may see preceding input before it is committed.
-				api.nvim_feedkeys(api.nvim_replace_termcodes(result, true, false, true), "in", false)
+				input.feed(result)
 			end
 			mappings[lhs] = {
 				callback = callback,
@@ -66,6 +67,19 @@ function M.setup()
 		M.detach(buf)
 	end
 	local group = api.nvim_create_augroup("tex-autopairs", { clear = true })
+	vim.on_key(input.observe, api.nvim_create_namespace("tex-autopairs-input"))
+	api.nvim_create_autocmd({ "BufLeave", "InsertLeavePre" }, {
+		group = group,
+		callback = function(event)
+			input.cancel_closing(event.buf)
+		end,
+	})
+	api.nvim_create_autocmd("CursorMovedI", {
+		group = group,
+		callback = function(event)
+			input.validate_closing(event.buf)
+		end,
+	})
 	api.nvim_create_autocmd({ "FileType", "BufEnter" }, {
 		group = group,
 		callback = function(event)

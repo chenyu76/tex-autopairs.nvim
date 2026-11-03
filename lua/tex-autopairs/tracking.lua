@@ -38,20 +38,28 @@ local function positions(state)
 	return result
 end
 
+local function tokens_intact(buf, position, line_count)
+	local pair = position.pair
+	local row, col = position.row, position.col
+	local end_row, end_col = position.end_row, position.end_col
+	-- Deleted ranges may leave extmarks at the position just past the final line.
+	local separated = row < end_row or (row == end_row and col + #pair.open <= end_col - #pair.close)
+	if end_row >= line_count or not separated then
+		return false
+	end
+	local first = api.nvim_buf_get_lines(buf, row, row + 1, true)[1]
+	local last = row == end_row and first or api.nvim_buf_get_lines(buf, end_row, end_row + 1, true)[1]
+	return first:sub(col + 1, col + #pair.open) == pair.open
+		and last:sub(end_col - #pair.close + 1, end_col) == pair.close
+		and not text.escaped(first:sub(1, col))
+end
+
 local function checkpoint(state)
 	local snapshot = positions(state)
+	local line_count = api.nvim_buf_line_count(state.buf)
 	-- Extmarks track positions; editing or escaping a token can end its ownership.
 	for mark_id, position in pairs(snapshot) do
-		local pair = position.pair
-		local row, col = position.row, position.col
-		local end_row, end_col = position.end_row, position.end_col
-		local first = api.nvim_buf_get_lines(state.buf, row, row + 1, true)[1]
-		local last = row == end_row and first or api.nvim_buf_get_lines(state.buf, end_row, end_row + 1, true)[1]
-		local intact = (row < end_row or col + #pair.open <= end_col - #pair.close)
-			and first:sub(col + 1, col + #pair.open) == pair.open
-			and last:sub(end_col - #pair.close + 1, end_col) == pair.close
-			and not text.escaped(first:sub(1, col))
-		if not intact then
+		if not tokens_intact(state.buf, position, line_count) then
 			snapshot[mark_id], state.pairs[mark_id] = nil, nil
 			api.nvim_buf_del_extmark(state.buf, namespace, mark_id)
 		end
@@ -175,8 +183,10 @@ function M.finish(mark_id)
 	checkpoint(state)
 end
 
-function M.at_closer(buf, row, col, typed_prefix_len)
+function M.at_closer(buf, row, col, typed_prefix_len, merged_len)
 	-- The cursor includes this many already-inserted characters of the closing token.
+	-- Merged characters already occupy the start of the generated closer.
+	merged_len = merged_len or 0
 	local state = states[buf]
 	local target
 	local extmarks = api.nvim_buf_get_extmarks(state.buf, namespace, { row, col }, { row, col }, {
@@ -192,7 +202,7 @@ function M.at_closer(buf, row, col, typed_prefix_len)
 		if
 			inside
 			and details.end_row == row
-			and details.end_col == col + #pair.close
+			and details.end_col == col + #pair.close - merged_len
 			and (not target or start_row > target.row or (start_row == target.row and start_col > target.col))
 		then
 			target = { mark_id = mark_id, pair = pair, row = start_row, col = start_col }
