@@ -2,6 +2,7 @@ local api = vim.api
 local delimiters = require("tex-autopairs.delimiters")
 local text = require("tex-autopairs.text")
 local tracking = require("tex-autopairs.tracking")
+local environment = require("tex-autopairs.environment")
 local M = {}
 local sessions = {}
 local emitting = false
@@ -10,6 +11,13 @@ local left, right = "<C-G>U<Left>", "<C-G>U<Right>"
 
 function M.end_feed()
 	emitting = false
+end
+
+function M.sync_environment(key)
+	local output = environment.after_input(key)
+	if output ~= "" then
+		M.feed(output)
+	end
 end
 
 function M.feed(keys)
@@ -37,8 +45,12 @@ local function closing_at(buf, row, col)
 	M.cancel_closing(buf)
 end
 
-function M.validate_closing(buf)
-	if sessions[buf] and not emitting then
+function M.validate_cursor(buf)
+	if emitting then
+		return
+	end
+	environment.validate(buf)
+	if sessions[buf] then
 		tracking.sync(buf)
 		local cursor = api.nvim_win_get_cursor(0)
 		closing_at(buf, cursor[1] - 1, cursor[2])
@@ -134,6 +146,14 @@ for _, key in ipairs({
 	"<Down>",
 	"<Home>",
 	"<End>",
+	"<PageUp>",
+	"<PageDown>",
+	"<S-Left>",
+	"<S-Right>",
+	"<C-Left>",
+	"<C-Right>",
+	"<C-Home>",
+	"<C-End>",
 	"<Del>",
 }) do
 	leave_keys[api.nvim_replace_termcodes(key, true, false, true)] = true
@@ -144,6 +164,13 @@ function M.observe(key)
 		return
 	end
 	local buf = api.nvim_get_current_buf()
+	if environment.active(buf) then
+		local byte = key:byte(1)
+		-- Observe navigation keys, but not Lua callbacks or <Cmd> command encodings.
+		if not delimiters.openers[key] and byte and (byte ~= 0x80 or leave_keys[key]) then
+			M.feed('<Cmd>lua require("tex-autopairs.input").sync_environment()<CR>')
+		end
+	end
 	local session = sessions[buf]
 	if not session then
 		return
@@ -238,19 +265,6 @@ local function close_pair(target)
 	return skip(target.pair.close) .. finish(target.mark_id)
 end
 
-local function replace_closer(target, close, key, merged)
-	local pair = target.pair
-	local remove = string.rep("<Del>", #pair.close - merged)
-	if pair.close_prefix_len > 0 and close.can_shorten then
-		return string.rep("<BS>", #close.close - 1)
-			.. remove
-			.. pair.close:sub(1, pair.close_prefix_len)
-			.. close.close
-			.. finish(target.mark_id)
-	end
-	return remove .. key .. finish(target.mark_id)
-end
-
 local function handle_dollar(buf, before, after, row, col)
 	if text.escaped(before) then
 		return "$"
@@ -274,8 +288,8 @@ local function handle_dollar(buf, before, after, row, col)
 	return "$" .. append_closer("$", "$")
 end
 
--- Called by the current buffer's Insert-mode mapping.
-function M.handle(key)
+-- Decide the native edits for the mapped key.
+local function handle(key)
 	-- Let native input report E21 if the buffer becomes nonmodifiable during insertion.
 	if not vim.bo.modifiable then
 		return key
@@ -329,7 +343,7 @@ function M.handle(key)
 		return restore_closer(target, merged) .. key .. append_closer(open.close, open.id)
 	end
 	if close and target and target.pair.replaceable and close.replaceable then
-		return replace_closer(target, close, key, merged)
+		return string.rep("<Del>", #target.pair.close - merged) .. key .. finish(target.mark_id)
 	end
 	if matching_after then
 		return skip(close.close)
@@ -341,6 +355,17 @@ function M.handle(key)
 		return edit_prefix(session, target, key, before)
 	end
 	return key
+end
+
+function M.insert(key)
+	local buf = api.nvim_get_current_buf()
+	local cleanup = environment.before_input(key)
+	local output = handle(key) .. cleanup
+	if key == "{" or environment.active(buf) then
+		local argument = vim.inspect(key:match("^[{}]$"))
+		output = output .. '<Cmd>lua require("tex-autopairs.input").sync_environment(' .. argument .. ")<CR>"
+	end
+	M.feed(output)
 end
 
 return M
