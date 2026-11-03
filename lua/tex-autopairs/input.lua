@@ -158,7 +158,8 @@ for _, key in ipairs({
 end
 
 function M.observe(key)
-	if emitting then
+	-- on_key also sees plugins' :normal! commands in temporary windows.
+	if emitting or api.nvim_get_mode().mode:sub(1, 1) ~= "i" then
 		return
 	end
 	local buf = api.nvim_get_current_buf()
@@ -178,7 +179,7 @@ function M.observe(key)
 	if not session then
 		return
 	end
-	if vim.bo.filetype ~= "tex" or not vim.bo.modifiable or api.nvim_get_mode().mode ~= "i" or leave_keys[key] then
+	if vim.bo.filetype ~= "tex" or not vim.bo.modifiable or leave_keys[key] then
 		M.cancel_closing(buf)
 		return
 	end
