@@ -1,9 +1,10 @@
 local api = vim.api
 local text = require("tex-autopairs.text")
+local keys = require("tex-autopairs.keys")
 local M = {}
 local namespace = api.nvim_create_namespace("tex-autopairs-environment")
 local sessions = {}
-local left, right = "<C-G>U<Left>", "<C-G>U<Right>"
+local left, right = keys.left, keys.right
 local begin_prefix, end_prefix = "\\begin{", "\\end{"
 local empty_end = end_prefix .. "}"
 
@@ -42,12 +43,21 @@ local function inside(name, cursor)
 	return cursor[1] - 1 == name.row and cursor[2] >= name.col and cursor[2] <= name.end_col
 end
 
-function M.validate(buf)
+local function names(buf, session)
+	local source = name_at(buf, session.source, begin_prefix)
+	local target = name_at(buf, session.target, end_prefix)
+	-- A changed target belongs to the user, even when its braces are still intact.
+	if source and target and source.row == target.row and target.value == session.mirrored then
+		return source, target
+	end
+end
+
+function M.validate_cursor(buf)
 	local session = sessions[buf]
 	if session then
-		local name = name_at(buf, session.source, begin_prefix)
-		if name and inside(name, api.nvim_win_get_cursor(0)) then
-			return name
+		local source, target = names(buf, session)
+		if source and inside(source, api.nvim_win_get_cursor(0)) then
+			return source, target
 		end
 		M.cancel(buf)
 	end
@@ -66,40 +76,7 @@ function M.start()
 			end_right_gravity = true,
 		})
 	end
-	local session = { source = mark(col), target = mark(col + 1 + #end_prefix) }
-	sessions[buf] = session
-	api.nvim_buf_attach(buf, false, {
-		on_bytes = function(_, _, _, row, col, _, old_rows, old_cols)
-			if sessions[buf] ~= session then
-				return true -- Unregister callbacks belonging to an ended session.
-			end
-			if session.updating then
-				return
-			end
-			-- on_bytes exposes the edit before extmarks move to their new positions.
-			local target_row, target_col, _, target_end = range(buf, session.target)
-			local last_row = row + old_rows
-			local last_col = old_rows == 0 and col + old_cols or old_cols
-			local before_end = row < target_row or (row == target_row and col < target_end + 1)
-			local after_start = last_row > target_row
-				or (last_row == target_row and last_col > target_col - #end_prefix)
-			if before_end and after_start then
-				M.cancel(buf)
-			end
-		end,
-		on_reload = function()
-			if sessions[buf] == session then
-				M.cancel(buf)
-			end
-		end,
-	})
-end
-
-function M.finish_mirror()
-	local session = sessions[api.nvim_get_current_buf()]
-	if session then
-		session.updating = nil
-	end
+	sessions[buf] = { source = mark(col), target = mark(col + 1 + #end_prefix), mirrored = "" }
 end
 
 local function cursor_steps(value)
@@ -111,21 +88,17 @@ local function delete_keys(value)
 	return string.rep("<Del>", vim.fn.strchars(value, vim.o.delcombine and 0 or 1))
 end
 
-function M.before_input(key)
+function M.prepare_input(key)
 	local buf = api.nvim_get_current_buf()
-	local source = M.validate(buf)
+	local source, target = M.validate_cursor(buf)
 	if key ~= "<BS>" or not source or source.value ~= "" then
 		return ""
 	end
-	local target = name_at(buf, sessions[buf].target, end_prefix)
-	if target and source.row == target.row then
-		-- Ordinary pairing removes the begin braces; remove only our generated end.
-		local line = api.nvim_get_current_line()
-		local gap = cursor_steps(line:sub(source.end_col + 2, target.col - #end_prefix))
-		M.cancel(buf)
-		return string.rep(right, gap) .. delete_keys(end_prefix .. target.value .. "}") .. string.rep(left, gap)
-	end
-	return ""
+	-- These edits follow ordinary empty-brace deletion and remove only our generated end.
+	local line = api.nvim_get_current_line()
+	local gap = cursor_steps(line:sub(source.end_col + 2, target.col - #end_prefix))
+	M.cancel(buf)
+	return string.rep(right, gap) .. delete_keys(end_prefix .. target.value .. "}") .. string.rep(left, gap)
 end
 
 -- Return native edits so mirroring participates in the insertion's undo and redo keys.
@@ -139,9 +112,6 @@ function M.after_input(key)
 		M.cancel(buf)
 		return ""
 	end
-	if session and session.updating then
-		return ""
-	end
 	local cursor = api.nvim_win_get_cursor(0)
 	local line = api.nvim_get_current_line()
 	if not session then
@@ -150,7 +120,7 @@ function M.after_input(key)
 			return right
 				.. empty_end
 				.. string.rep(left, #empty_end + 1)
-				.. '<Cmd>lua require("tex-autopairs.environment").start()<CR>'
+				.. keys.command('require("tex-autopairs.environment").start()')
 		end
 		return ""
 	end
@@ -158,29 +128,27 @@ function M.after_input(key)
 	if vim.fn.pumvisible() == 1 then
 		return ""
 	end
-	local source = name_at(buf, session.source, begin_prefix)
-	local target = name_at(buf, session.target, end_prefix)
-	if not source or not target or source.row ~= target.row then
+	local source, target = names(buf, session)
+	if not source then
 		M.cancel(buf)
 		return ""
 	end
-	if key == "}" then
-		M.cancel(buf)
-	elseif not inside(source, cursor) then
+	local finished = key == "}"
+	if not finished and not inside(source, cursor) then
 		M.cancel(buf)
 		return ""
 	end
-	if source.value == target.value then
-		return ""
+	local output = ""
+	if source.value ~= target.value then
+		local distance = cursor_steps(line:sub(cursor[2] + 1, target.col))
+		output = string.rep(right, distance)
+			.. delete_keys(target.value)
+			.. source.value
+			.. string.rep(left, distance + cursor_steps(source.value))
+		session.mirrored = source.value
 	end
-	local distance = cursor_steps(line:sub(cursor[2] + 1, target.col))
-	local output = string.rep(right, distance)
-		.. delete_keys(target.value)
-		.. source.value
-		.. string.rep(left, distance + cursor_steps(source.value))
-	if sessions[buf] then
-		session.updating = true
-		output = output .. '<Cmd>lua require("tex-autopairs.environment").finish_mirror()<CR>'
+	if finished then
+		M.cancel(buf)
 	end
 	return output
 end

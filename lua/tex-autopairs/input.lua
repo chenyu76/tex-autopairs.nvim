@@ -3,11 +3,11 @@ local delimiters = require("tex-autopairs.delimiters")
 local text = require("tex-autopairs.text")
 local tracking = require("tex-autopairs.tracking")
 local environment = require("tex-autopairs.environment")
+local keys = require("tex-autopairs.keys")
 local M = {}
 local sessions = {}
 local emitting = false
--- Automatic cursor moves must stay in the same undo block as the insertion.
-local left, right = "<C-G>U<Left>", "<C-G>U<Right>"
+local left, right = keys.left, keys.right
 
 function M.end_feed()
 	emitting = false
@@ -20,10 +20,10 @@ function M.sync_environment(key)
 	end
 end
 
-function M.feed(keys)
+function M.feed(output)
 	-- Generated cursor commands contain unmapped bytes, such as U in <C-G>U.
 	emitting = true
-	local output = keys .. '<Cmd>lua require("tex-autopairs.input").end_feed()<CR>'
+	output = output .. keys.command('require("tex-autopairs.input").end_feed()')
 	api.nvim_feedkeys(api.nvim_replace_termcodes(output, true, false, true), "in", false)
 end
 
@@ -49,7 +49,7 @@ function M.validate_cursor(buf)
 	if emitting then
 		return
 	end
-	environment.validate(buf)
+	environment.validate_cursor(buf)
 	if sessions[buf] then
 		tracking.sync(buf)
 		local cursor = api.nvim_win_get_cursor(0)
@@ -72,7 +72,7 @@ function M.resume_closing(merged, start_col)
 end
 
 local function resume_closing(merged, start_col)
-	return '<Cmd>lua require("tex-autopairs.input").resume_closing(' .. merged .. "," .. start_col .. ")<CR>"
+	return keys.command('require("tex-autopairs.input").resume_closing(' .. merged .. "," .. start_col .. ")")
 end
 
 local function restore_closer(target, merged)
@@ -121,9 +121,7 @@ local function edit_prefix(session, target, key, before)
 		end
 		return restore_closer(target, previous)
 			.. key
-			.. '<Cmd>lua require("tex-autopairs.input").reconcile_closing('
-			.. start_col
-			.. ")<CR>"
+			.. keys.command('require("tex-autopairs.input").reconcile_closing(' .. start_col .. ")")
 	end
 	local merged = matched_prefix_len(typed .. key, target.pair.close)
 	local output
@@ -164,14 +162,19 @@ function M.observe(key)
 		return
 	end
 	local buf = api.nvim_get_current_buf()
-	if environment.active(buf) then
-		local byte = key:byte(1)
+	local session = sessions[buf]
+	local syncing_environment = environment.active(buf)
+	if not session and not syncing_environment then
+		return
+	end
+	local byte = key:byte(1)
+	local mapped = delimiters.is_mapped(key)
+	if syncing_environment then
 		-- Observe navigation keys, but not Lua callbacks or <Cmd> command encodings.
-		if not delimiters.openers[key] and byte and (byte ~= 0x80 or leave_keys[key]) then
-			M.feed('<Cmd>lua require("tex-autopairs.input").sync_environment()<CR>')
+		if not mapped and byte and (byte ~= 0x80 or leave_keys[key]) then
+			M.feed(keys.command('require("tex-autopairs.input").sync_environment()'))
 		end
 	end
-	local session = sessions[buf]
 	if not session then
 		return
 	end
@@ -180,17 +183,10 @@ function M.observe(key)
 		return
 	end
 	-- Mapped characters are handled before their native output is emitted.
-	local byte = key:byte(1)
 	-- K_SPECIAL (0x80) prefixes encoded keys, including Lua mapping callbacks.
 	local newline = key == "\r" or key == "\n"
 	local tab = key == "\t"
-	if
-		delimiters.openers[key]
-		or not byte
-		or (byte < 32 and not newline and not tab)
-		or byte == 127
-		or byte == 0x80
-	then
+	if mapped or not byte or (byte < 32 and not newline and not tab) or byte == 127 or byte == 0x80 then
 		return
 	end
 	tracking.sync(buf)
@@ -214,17 +210,16 @@ function M.observe(key)
 	end
 end
 
--- <Cmd> queues state updates after native edits and cursor movement have run.
 local function track(reference)
-	return '<Cmd>lua require("tex-autopairs.tracking").track(' .. vim.inspect(reference) .. ")<CR>"
+	return keys.command('require("tex-autopairs.tracking").track(' .. vim.inspect(reference) .. ")")
 end
 
 local function finish(mark_id)
-	return '<Cmd>lua require("tex-autopairs.tracking").finish(' .. mark_id .. ")<CR>"
+	return keys.command('require("tex-autopairs.tracking").finish(' .. mark_id .. ")")
 end
 
-local function append_closer(token, reference)
-	return token .. string.rep(left, #token) .. track(reference)
+local function append_closer(pair)
+	return pair.close .. string.rep(left, #pair.close) .. track(pair.id)
 end
 
 local function completed(value, candidates, field)
@@ -251,7 +246,7 @@ local function empty_pair(before, after, target, row, col)
 	for width = 2, 1, -1 do
 		local token = string.rep("$", width)
 		if text.ends_with_unescaped(before, token) and vim.startswith(after, token) then
-			return { open = token, close = token, replaceable = false }
+			return delimiters.dollar(token)
 		end
 	end
 end
@@ -273,7 +268,7 @@ local function handle_dollar(buf, before, after, row, col)
 	if target and (target.pair.open == "$" or target.pair.open == "$$") then
 		local pair = target.pair
 		if pair.open == "$" and target.row == row and target.col + #pair.open == col then
-			return close_pair(target) .. append_closer("$$", "$$")
+			return close_pair(target) .. append_closer(delimiters.dollar("$$"))
 		end
 		-- A closing token cannot borrow dollars from its opener.
 		local body = target.row == row and before:sub(target.col + #pair.open + 1) or before
@@ -285,7 +280,8 @@ local function handle_dollar(buf, before, after, row, col)
 	if vim.startswith(after, "$") then
 		return right
 	end
-	return "$" .. append_closer("$", "$")
+	local pair = delimiters.dollar("$")
+	return pair.open .. append_closer(pair)
 end
 
 -- Decide the native edits for the mapped key.
@@ -323,7 +319,7 @@ local function handle(key)
 	local close = completed(candidate, delimiters.closers[key], "close")
 	-- Decide the longest token before choosing an opening or closing action.
 	if open and (not close or #open.open > #close.close) then
-		return restore_closer(target, merged) .. key .. append_closer(open.close, open.id)
+		return restore_closer(target, merged) .. key .. append_closer(open)
 	end
 	if not target then
 		target = tracking.at_closer(buf, row, col, close and #close.close - 1 or 0)
@@ -340,9 +336,9 @@ local function handle(key)
 		if matching_after then
 			return skip(close.close)
 		end
-		return restore_closer(target, merged) .. key .. append_closer(open.close, open.id)
+		return restore_closer(target, merged) .. key .. append_closer(open)
 	end
-	if close and target and target.pair.replaceable and close.replaceable then
+	if close and target and delimiters.can_replace(target.pair, close) then
 		return string.rep("<Del>", #target.pair.close - merged) .. key .. finish(target.mark_id)
 	end
 	if matching_after then
@@ -359,11 +355,11 @@ end
 
 function M.insert(key)
 	local buf = api.nvim_get_current_buf()
-	local cleanup = environment.before_input(key)
-	local output = handle(key) .. cleanup
+	local trailing = environment.prepare_input(key)
+	local output = handle(key) .. trailing
 	if key == "{" or environment.active(buf) then
 		local argument = vim.inspect(key:match("^[{}]$"))
-		output = output .. '<Cmd>lua require("tex-autopairs.input").sync_environment(' .. argument .. ")<CR>"
+		output = output .. keys.command('require("tex-autopairs.input").sync_environment(' .. argument .. ")")
 	end
 	M.feed(output)
 end

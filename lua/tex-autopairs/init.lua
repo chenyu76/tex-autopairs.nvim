@@ -73,7 +73,7 @@ function M.setup()
 	end
 	local group = api.nvim_create_augroup("tex-autopairs", { clear = true })
 	vim.on_key(input.observe, api.nvim_create_namespace("tex-autopairs-input"))
-	api.nvim_create_autocmd({ "BufLeave", "InsertLeavePre" }, {
+	api.nvim_create_autocmd({ "BufLeave", "InsertLeavePre", "BufReadPre" }, {
 		group = group,
 		callback = function(event)
 			input.cancel_closing(event.buf)

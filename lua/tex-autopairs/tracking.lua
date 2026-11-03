@@ -165,12 +165,7 @@ end
 ---@param reference integer|string Pair definition id, or the literal dollar token.
 function M.track(reference)
 	local cursor = api.nvim_win_get_cursor(0)
-	local pair
-	if type(reference) == "number" then
-		pair = delimiters.pairs[reference]
-	else
-		pair = { open = reference, close = reference, replaceable = false }
-	end
+	local pair = delimiters.pairs[reference] or delimiters.dollar(reference)
 	-- Definition ids select pairs; extmark ids identify their individual occurrences.
 	add(states[api.nvim_get_current_buf()], pair, cursor[1] - 1, cursor[2])
 end
