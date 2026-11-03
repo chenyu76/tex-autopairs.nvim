@@ -28,14 +28,16 @@ This plugin supports the following autopairs:
   combine with parentheses, brackets, escaped braces, the named delimiters
   above, `<`/`>`, `|`, `\vert`, and `\Vert`.
 - A backtick opens a quote pair closed by an apostrophe, i.e.
-    ```
-    `' and ``''
-	```
-
-See `:help tex-autopairs-pairs` and `:help tex-autopairs-environments` for the
-complete input, replacement, and synchronization rules.
+  ```text
+  `' and ``''
+  ```
+- A different closing bracket can replace the generated one, e.g. `[0, 1)`
+  or `\left[0, 1\right)` for a left-closed, right-open interval.
+- `\begin{` also inserts `\end{}` and synchronizes the environment name until
+  you type `}` or leave the name, Insert mode, or buffer.
 
 ## Installation
+
 Install using your favorite package manager.
 
 ### [vim.pack](https://neovim.io/doc/user/pack/#vim.pack)
