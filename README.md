@@ -1,12 +1,6 @@
 # tex-autopairs.nvim
 
-Generic Neovim autopair plugins are excellent: they cover almost every language, add
-no ceremony, and stay out of the way. TeX is the one place where their model
-breaks down. A delimiter may span several characters: the opener is often a
-command (e.g. `\left(`, `\langle`), the closer is a different command (`\right)`,
-`\rangle`), display math can use a two-character closer identical to its opener
-(`$$`), and every closer command begins with the same backslash as every
-ordinary command.
+Generic Neovim autopair plugins are excellent: they cover almost every language, add no ceremony, and stay out of the way. TeX is the one place where their model breaks down. A delimiter may span several characters, display math can use a two-character closer identical to its opener (`$$`), and every closer command begins with the same backslash as every ordinary command.
 
 This plugin provides Insert-mode pairing for filetype `tex` to handle those cases.
 
@@ -75,7 +69,7 @@ use({
 
 ## Configuration
 
-The plugin currently has no configuration options.
+The plugin currently has no configuration options yet.
 
 ## Using it together with [nvim-autopairs](https://github.com/windwp/nvim-autopairs)
 
