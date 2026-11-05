@@ -25,8 +25,8 @@ This plugin supports the following autopairs:
   ```text
   `' and ``''
   ```
-- A different closing bracket can replace the generated one, e.g. `[0, 1)`
-  or `\left[0, 1\right)` for a left-closed, right-open interval.
+- A different closing bracket can replace the generated one, e.g. `[0, 1)` or `\left[0, 1\right)`
+  for a left-closed, right-open interval.
 - `\begin{` also inserts `\end{}` and synchronizes the environment name until
   you type `}` or leave the name, Insert mode, or buffer.
 
@@ -69,7 +69,33 @@ use({
 
 ## Configuration
 
-The plugin currently has no configuration options yet.
+Lists of pairs and modifiers can be configured via `setup`.
+Pass `definitions` or `modifiers` to replace either list.
+Default lists are in [config.lua](lua/tex-autopairs/config.lua).
+
+```lua
+require("tex-autopairs").setup({
+	definitions = {
+		{ open = "(", close = ")", standalone = true, sized = true, replaceable = true },
+		{ open = "[", close = "]", standalone = true, sized = true, replaceable = true },
+		{ open = "{", close = "}", standalone = true, replaceable = true },
+	},
+	modifiers = {
+		{ open = "\\left", close = "\\right" },
+		{ open = "\\big", close = "\\big" },
+	},
+})
+```
+
+- `open`/`close`: opening token and its matching closing token.
+- `standalone`: pair direct input, e.g. `(` inserts `)`.
+- `sized`: combine the definition with each modifier.
+- `replaceable`: allow closer overrides, e.g. typing `)` replaces the generated `]` in `[0, 1)`.
+
+Omitted flags are false.
+
+Dollar pairing is always enabled since it contains some different logic;
+environment pairing requires a standalone `{`/`}` definition.
 
 ## Using it together with [nvim-autopairs](https://github.com/windwp/nvim-autopairs)
 

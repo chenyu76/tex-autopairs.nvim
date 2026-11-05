@@ -1,127 +1,90 @@
-local M = { pairs = {}, openers = {}, closers = {} }
+local M = {}
+local mapped_keys
 
--- open/close: opening token and its matching closing token.
--- standalone: pair direct input, e.g. ( inserts ).
--- sized: generate sized pairs, e.g. \left( and \bigl(.
--- replaceable: allow closer overrides, e.g. [x) replaces the generated ].
--- Both tokens must allow an override and have the same closing size command.
--- Omitted boolean flags default to false.
-local definitions = {
-	{ open = "(", close = ")", standalone = true, sized = true, replaceable = true },
-	{ open = "[", close = "]", standalone = true, sized = true, replaceable = true },
-	{ open = "\\{", close = "\\}", standalone = true, sized = true, replaceable = true },
-	{ open = "\\langle", close = "\\rangle", standalone = true, sized = true, replaceable = true },
-	{ open = "\\lceil", close = "\\rceil", standalone = true, sized = true, replaceable = true },
-	{ open = "\\lfloor", close = "\\rfloor", standalone = true, sized = true, replaceable = true },
-	{ open = "\\lbrace", close = "\\rbrace", standalone = true, sized = true, replaceable = true },
-	{ open = "\\lbrack", close = "\\rbrack", standalone = true, sized = true, replaceable = true },
-	{ open = "\\lparen", close = "\\rparen", standalone = true, sized = true, replaceable = true },
-	{ open = "\\lvert", close = "\\rvert", standalone = true, sized = true, replaceable = true },
-	{ open = "\\lVert", close = "\\rVert", standalone = true, sized = true, replaceable = true },
-	{ open = "\\lgroup", close = "\\rgroup", standalone = true, sized = true, replaceable = true },
-	{ open = "\\lmoustache", close = "\\rmoustache", standalone = true, sized = true, replaceable = true },
-	{ open = "\\|", close = "\\|", standalone = true, sized = true, replaceable = true },
-	-- Bare angles and bars also serve as relations or separators.
-	{ open = "<", close = ">", sized = true, replaceable = true },
-	{ open = "|", close = "|", sized = true, replaceable = true },
-	{ open = "\\vert", close = "\\vert", sized = true, replaceable = true },
-	{ open = "\\Vert", close = "\\Vert", sized = true, replaceable = true },
-	-- Grouping braces, math markers, and quotes do not take size commands.
-	{ open = "{", close = "}", standalone = true, replaceable = true },
-	{ open = "\\(", close = "\\)", standalone = true },
-	{ open = "\\[", close = "\\]", standalone = true },
-	{ open = "`", close = "'", standalone = true },
-}
+-- Runtime start builds the catalog before input or tracking can consume its indexes.
+function M.load(config)
+	local definitions, modifiers = config.definitions, config.modifiers
+	M.pairs, M.openers, M.closers = {}, {}, {}
 
--- Runtime close_modifier is the closing size command, or "" for unsized tokens.
-for _, spec in ipairs(definitions) do
-	if spec.standalone then
+	-- Runtime close_modifier is the closing size command, or "" for unsized tokens.
+	local function add_pair(open, close, close_modifier, replaceable)
 		table.insert(M.pairs, {
-			open = spec.open,
-			close = spec.close,
-			close_modifier = "",
-			replaceable = spec.replaceable == true,
+			id = #M.pairs + 1,
+			open = open,
+			close = close,
+			close_modifier = close_modifier,
+			replaceable = replaceable == true,
 		})
 	end
-end
 
--- Explicit right commands also accept opening shapes and invisible delimiters.
-local closer_tokens = {}
-local function add_closer(close, close_modifier, replaceable)
-	table.insert(closer_tokens, { close = close, close_modifier = close_modifier, replaceable = replaceable })
-end
-
-for _, size in ipairs({
-	{ open = "\\left", close = "\\right" },
-	{ open = "\\bigl", close = "\\bigr" },
-	{ open = "\\Bigl", close = "\\Bigr" },
-	{ open = "\\biggl", close = "\\biggr" },
-	{ open = "\\Biggl", close = "\\Biggr" },
-	{ open = "\\big", close = "\\big" },
-	{ open = "\\Big", close = "\\Big" },
-	{ open = "\\bigg", close = "\\bigg" },
-	{ open = "\\Bigg", close = "\\Bigg" },
-}) do
 	for _, spec in ipairs(definitions) do
-		if spec.sized then
-			table.insert(M.pairs, {
-				open = size.open .. spec.open,
-				close = size.close .. spec.close,
-				close_modifier = size.close,
-				replaceable = spec.replaceable == true,
-			})
-			if size.open ~= size.close and spec.open ~= spec.close then
-				add_closer(size.close .. spec.open, size.close, spec.replaceable == true)
-			end
+		if spec.standalone then
+			add_pair(spec.open, spec.close, "", spec.replaceable)
 		end
 	end
-	-- A dot after a size command denotes an invisible delimiter.
-	add_closer(size.close .. ".", size.close, true)
-end
 
-local function add_to_index(index, token, spec)
-	-- Mappings run on the final character of a complete token.
-	local key = token:sub(-1)
-	index[key] = index[key] or {}
-	table.insert(index[key], spec)
-end
+	-- Explicit right commands also accept opening shapes and invisible delimiters.
+	local closer_tokens = {}
+	local function add_closer(close, close_modifier, replaceable)
+		table.insert(closer_tokens, { close = close, close_modifier = close_modifier, replaceable = replaceable })
+	end
 
-for id, spec in ipairs(M.pairs) do
-	spec.id = id
-	add_to_index(M.openers, spec.open, spec)
-	-- Closers have their own vocabulary; some have no corresponding opener.
-	add_closer(spec.close, spec.close_modifier, spec.replaceable)
-end
-for _, spec in ipairs(closer_tokens) do
-	add_to_index(M.closers, spec.close, spec)
-end
+	for _, modifier in ipairs(modifiers) do
+		for _, spec in ipairs(definitions) do
+			if spec.sized then
+				add_pair(modifier.open .. spec.open, modifier.close .. spec.close, modifier.close, spec.replaceable)
+				if modifier.open ~= modifier.close and spec.open ~= spec.close then
+					add_closer(modifier.close .. spec.open, modifier.close, spec.replaceable == true)
+				end
+			end
+		end
+		-- A dot after a size command denotes an invisible delimiter.
+		add_closer(modifier.close .. ".", modifier.close, true)
+	end
 
--- Dollar input and deletion are handled outside the ordinary token lookup.
-local mapped_keys = { ["$"] = true, ["<BS>"] = true }
-for key in pairs(M.openers) do
-	mapped_keys[key] = true
-end
-for _, spec in ipairs(closer_tokens) do
-	for key in spec.close:gmatch(".") do
+	local function add_to_index(index, token, spec)
+		-- Mappings run on the final character of a complete token.
+		local key = token:sub(-1)
+		index[key] = index[key] or {}
+		table.insert(index[key], spec)
+	end
+
+	for _, spec in ipairs(M.pairs) do
+		add_to_index(M.openers, spec.open, spec)
+		-- Closers have their own vocabulary; some have no corresponding opener.
+		add_closer(spec.close, spec.close_modifier, spec.replaceable)
+	end
+	for _, spec in ipairs(closer_tokens) do
+		add_to_index(M.closers, spec.close, spec)
+	end
+
+	-- Dollar input and deletion are handled outside the ordinary token lookup.
+	mapped_keys = { ["$"] = true, ["<BS>"] = true }
+	-- Openers match buffer suffixes; closers need every character mapped for prefix merging.
+	for key in pairs(M.openers) do
 		mapped_keys[key] = true
 	end
-end
-M.keys = vim.tbl_keys(mapped_keys)
-table.sort(M.keys)
-for _, key in ipairs(M.keys) do
-	-- Empty buckets also identify keys mapped only for the other index or special input.
-	local openers, closers = M.openers[key] or {}, M.closers[key] or {}
-	M.openers[key], M.closers[key] = openers, closers
-	table.sort(openers, function(a, b)
-		return #a.open > #b.open
-	end)
-	table.sort(closers, function(a, b)
-		return #a.close > #b.close
-	end)
+	for _, spec in ipairs(closer_tokens) do
+		for key in spec.close:gmatch(".") do
+			mapped_keys[key] = true
+		end
+	end
+	for _, openers in pairs(M.openers) do
+		table.sort(openers, function(a, b)
+			return #a.open > #b.open
+		end)
+	end
+	for _, closers in pairs(M.closers) do
+		table.sort(closers, function(a, b)
+			return #a.close > #b.close
+		end)
+	end
+	M.keys = vim.tbl_keys(mapped_keys)
+	table.sort(M.keys)
 end
 
 function M.is_mapped(key)
-	return M.openers[key] ~= nil
+	return mapped_keys[key] == true
 end
 
 function M.can_replace(pair, closer)

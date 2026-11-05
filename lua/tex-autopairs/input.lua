@@ -224,7 +224,7 @@ local function append_closer(pair)
 end
 
 local function completed(value, candidates, field)
-	for _, spec in ipairs(candidates) do
+	for _, spec in ipairs(candidates or {}) do
 		if text.ends_with_unescaped(value, spec[field]) then
 			return spec
 		end
