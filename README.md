@@ -6,9 +6,9 @@ This plugin provides Insert-mode pairing for filetype `tex` to handle those case
 
 Requires Neovim 0.10 or newer.
 
-## Supported pairs
+## Functionality
 
-This plugin supports the following autopairs:
+Supported pairs:
 
 - `$` gives `$`/`$`; a second `$` in that empty pair widens it to `$$`/`$$`.
   Further dollars close the display pair.
@@ -22,13 +22,19 @@ This plugin supports the following autopairs:
   combine with parentheses, brackets, escaped braces, the named delimiters
   above, `<`/`>`, `|`, `\vert`, and `\Vert`.
 - A backtick opens a quote pair closed by an apostrophe, i.e.
+
   ```text
   `' and ``''
   ```
-- A different closing bracket can replace the generated one, e.g. `[0, 1)` or `\left[0, 1\right)`
-  for a left-closed, right-open interval.
-- `\begin{` also inserts `\end{}` and synchronizes the environment name until
-  you type `}` or leave the name, Insert mode, or buffer.
+
+A different closing bracket can replace the generated one, e.g. `[0, 1)` or
+`\left[0, 1\right)` for a left-closed, right-open interval.
+
+`\begin{` also inserts `\end{}` and synchronizes the environment name until
+you type `}` or leave the name, Insert mode, or buffer.
+
+Press `<CR>` in a freshly generated empty pair, or after `\begin{name}`, to open
+a blank line before its closer. Moving away or typing content cancels expansion.
 
 ## Installation
 
@@ -69,9 +75,8 @@ use({
 
 ## Configuration
 
-Lists of pairs and modifiers can be configured via `setup`.
 Pass `definitions` or `modifiers` to replace either list.
-Default lists are in [config.lua](lua/tex-autopairs/config.lua).
+Default lists and definition fields are documented in [config.lua](lua/tex-autopairs/config.lua).
 
 ```lua
 require("tex-autopairs").setup({
@@ -84,15 +89,11 @@ require("tex-autopairs").setup({
 		{ open = "\\left", close = "\\right" },
 		{ open = "\\big", close = "\\big" },
 	},
+	newline = true,
 })
 ```
 
-- `open`/`close`: opening token and its matching closing token.
-- `standalone`: pair direct input, e.g. `(` inserts `)`.
-- `sized`: combine the definition with each modifier.
-- `replaceable`: allow closer overrides, e.g. typing `)` replaces the generated `]` in `[0, 1)`.
-
-Omitted flags are false.
+`newline` defaults to `true`; set it to `false` to disable Enter expansion.
 
 Dollar pairing is always enabled since it contains some different logic;
 environment pairing requires a standalone `{`/`}` definition.

@@ -1,11 +1,13 @@
 local M = {}
 local defaults = {
+	-- Enter in a freshly generated empty pair opens a blank line; false disables it.
+	newline = true,
 	-- open/close: opening token and its matching closing token.
 	-- standalone: pair direct input, e.g. ( inserts ).
 	-- sized: combine this definition with each modifier below.
 	-- replaceable: allow typing ) to replace a generated ], as in [0, 1).
 	-- Both tokens must allow replacement and use the same closing size command.
-	-- Omitted boolean flags default to false.
+	-- Omitted definition flags default to false.
 	definitions = {
 		{ open = "(", close = ")", standalone = true, sized = true, replaceable = true },
 		{ open = "[", close = "]", standalone = true, sized = true, replaceable = true },

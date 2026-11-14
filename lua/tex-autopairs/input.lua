@@ -4,6 +4,7 @@ local text = require("tex-autopairs.text")
 local tracking = require("tex-autopairs.tracking")
 local environment = require("tex-autopairs.environment")
 local keys = require("tex-autopairs.keys")
+local newline = require("tex-autopairs.newline")
 local M = {}
 local sessions = {}
 local emitting = false
@@ -14,7 +15,10 @@ function M.end_feed()
 end
 
 function M.sync_environment(key)
-	local output = environment.after_input(key)
+	local output, empty_body = environment.after_input(key)
+	if empty_body then
+		output = output .. newline.start_command
+	end
 	if output ~= "" then
 		M.feed(output)
 	end
@@ -49,6 +53,7 @@ function M.validate_cursor(buf)
 	if emitting then
 		return
 	end
+	newline.validate(buf)
 	environment.validate_cursor(buf)
 	if sessions[buf] then
 		tracking.sync(buf)
@@ -163,31 +168,43 @@ function M.observe(key)
 		return
 	end
 	local buf = api.nvim_get_current_buf()
+	-- :noautocmd can leave our mappings installed after a filetype change.
+	if vim.bo[buf].filetype ~= "tex" then
+		return
+	end
+	local byte = key:byte(1)
+	-- Observe text and navigation keys, not Lua callbacks or <Cmd> command encodings.
+	local observable_key = byte and (byte ~= 0x80 or leave_keys[key])
+	local is_newline = key == "\r" or key == "\n"
+	if is_newline then
+		local output = newline.on_enter(buf)
+		if output then
+			M.feed(output)
+			return
+		end
+	elseif observable_key then
+		newline.cancel(buf)
+	end
 	local session = sessions[buf]
 	local syncing_environment = environment.active(buf)
 	if not session and not syncing_environment then
 		return
 	end
-	local byte = key:byte(1)
 	local mapped = delimiters.is_mapped(key)
-	if syncing_environment then
-		-- Observe navigation keys, but not Lua callbacks or <Cmd> command encodings.
-		if not mapped and byte and (byte ~= 0x80 or leave_keys[key]) then
-			M.feed(keys.command('require("tex-autopairs.input").sync_environment()'))
-		end
+	if syncing_environment and not mapped and observable_key then
+		M.feed(keys.command('require("tex-autopairs.input").sync_environment()'))
 	end
 	if not session then
 		return
 	end
-	if vim.bo.filetype ~= "tex" or not vim.bo.modifiable or leave_keys[key] then
+	if not vim.bo.modifiable or leave_keys[key] then
 		M.cancel_closing(buf)
 		return
 	end
 	-- Mapped characters are handled before their native output is emitted.
 	-- K_SPECIAL (0x80) prefixes encoded keys, including Lua mapping callbacks.
-	local newline = key == "\r" or key == "\n"
 	local tab = key == "\t"
-	if mapped or not byte or (byte < 32 and not newline and not tab) or byte == 127 or byte == 0x80 then
+	if mapped or not byte or (byte < 32 and not is_newline and not tab) or byte == 127 or byte == 0x80 then
 		return
 	end
 	tracking.sync(buf)
@@ -197,7 +214,7 @@ function M.observe(key)
 	if not session then
 		return
 	end
-	if newline then
+	if is_newline then
 		-- A new line ends this session; repair after native indentation or line insertion.
 		M.cancel_closing(buf)
 		if session.merged > 0 then
@@ -220,7 +237,7 @@ local function finish(mark_id)
 end
 
 local function append_closer(pair)
-	return pair.close .. string.rep(left, #pair.close) .. track(pair.id)
+	return pair.close .. string.rep(left, #pair.close) .. track(pair.id) .. newline.start_command
 end
 
 local function completed(value, candidates, field)
@@ -356,6 +373,7 @@ end
 
 function M.insert(key)
 	local buf = api.nvim_get_current_buf()
+	newline.cancel(buf)
 	local trailing = environment.prepare_input(key)
 	local output = handle(key) .. trailing
 	if key == "{" or environment.active(buf) then

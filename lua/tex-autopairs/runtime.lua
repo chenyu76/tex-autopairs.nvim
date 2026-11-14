@@ -4,6 +4,7 @@ local delimiters = require("tex-autopairs.delimiters")
 local input = require("tex-autopairs.input")
 local tracking = require("tex-autopairs.tracking")
 local environment = require("tex-autopairs.environment")
+local newline = require("tex-autopairs.newline")
 local M = {}
 local mappings_by_buffer = {}
 local on_key_namespace = api.nvim_create_namespace("tex-autopairs-input")
@@ -16,6 +17,7 @@ function M.detach(buf)
 		return
 	end
 	mappings_by_buffer[buf] = nil
+	newline.cancel(buf)
 	input.cancel_closing(buf)
 	environment.cancel(buf)
 	-- maparg/mapset operate in the current buffer, even for hidden buffers.
@@ -81,6 +83,7 @@ end
 
 function M.start(config)
 	delimiters.load(config)
+	newline.load(config)
 	group = api.nvim_create_augroup("tex-autopairs", { clear = true })
 	vim.on_key(input.observe, on_key_namespace)
 
@@ -106,6 +109,7 @@ function M.start(config)
 	api.nvim_create_autocmd({ "BufLeave", "InsertLeavePre", "BufReadPre" }, {
 		group = group,
 		callback = function(event)
+			newline.cancel(event.buf)
 			input.cancel_closing(event.buf)
 			environment.cancel(event.buf)
 		end,

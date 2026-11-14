@@ -102,6 +102,9 @@ function M.prepare_input(key)
 end
 
 -- Return native edits so mirroring participates in the insertion's undo and redo keys.
+---@param key? string
+---@return string output
+---@return boolean? empty_body Whether a completed begin directly precedes its generated end.
 function M.after_input(key)
 	local buf = api.nvim_get_current_buf()
 	local session = sessions[buf]
@@ -149,6 +152,7 @@ function M.after_input(key)
 	end
 	if finished then
 		M.cancel(buf)
+		return output, cursor[1] - 1 == target.row and cursor[2] == target.col - #end_prefix
 	end
 	return output
 end
