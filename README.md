@@ -6,6 +6,8 @@ This plugin provides Insert-mode pairing for filetype `tex` to handle those case
 
 Requires Neovim 0.10 or newer.
 
+This plugin is still in the early stage of development and may contains some bugs. Feel free to open an issue.
+
 ## Functionality
 
 Supported pairs:
